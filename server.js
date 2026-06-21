@@ -26,7 +26,7 @@ app.use(express.json({ limit: '1kb' }));
 // ─── Firebase Admin Init ────────────────────────────────────────────────────
 // serviceAccountKey.json is uploaded as a Render secret file
 admin.initializeApp({
-  credential: admin.credential.cert(require('./serviceAccountKey.json')),
+  credential: admin.credential.cert(require('./octate-wee-firebase-adminsdk-fbsvc-66d6e38c4a.json')),
 });
 
 const db = admin.firestore();
