@@ -1,0 +1,14 @@
+{
+  "name": "quidec-relay",
+  "version": "1.0.0",
+  "description": "FCM push notification relay for Quidec — zero storage, pure passthrough",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "firebase-admin": "^13.0.0"
+  }
+}
