@@ -17,6 +17,8 @@
 
 const express = require('express');
 const admin = require('firebase-admin');
+const { getFirestore } = require('firebase-admin/firestore');
+const { getMessaging } = require('firebase-admin/messaging');
 const app = express();
 app.use(express.json({ limit: '1kb' }));
 app.use((req, res, next) => {
@@ -28,12 +30,11 @@ app.use((req, res, next) => {
 });
 
 // ─── Firebase Admin Init ────────────────────────────────────────────────────
-// serviceAccountKey.json is uploaded as a Render secret file
 admin.initializeApp({
   credential: admin.credential.cert(require('./octate-wee-firebase-adminsdk-fbsvc-66d6e38c4a.json')),
 });
 
-const db = admin.firestore('quidec');
+const db = getFirestore(admin.app(), 'quidec');
 
 // ─── Memory Limiter (300 MB cap on 512 MB Render container) ─────────────────
 const MEMORY_LIMIT_MB = 300;
@@ -86,7 +87,7 @@ app.post('/notify', async (req, res) => {
     const body = `${fromName} sent ${typeLabels[type] || 'a message'}`;
 
     // Send FCM
-    await admin.messaging().send({
+    await getMessaging().send({
       token: fcmToken,
       notification: { title: fromName, body },
       data: { type: `new_${type}`, fromName },
