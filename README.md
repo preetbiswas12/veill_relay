@@ -1,46 +1,28 @@
-# Quidec FCM Relay Server
+# quidec-relay (DEPRECATED)
 
-Minimal notification relay — receives a signal, sends FCM push, returns. Zero storage.
+> **This relay is no longer needed.** FCM push notifications are now handled directly by [quidec_server](https://github.com/preetbiswas12/quidec_server) via `src/services/fcm.ts`.
 
-## API
+## What changed
 
-### `GET /`
-Health check. Returns `{ ok: true, uptime, memory }`.
+- The standalone Express relay (`server.js`) forwarded push notifications through Firebase Admin SDK.
+- `quidec_server` now sends FCM push notifications natively — no separate relay process required.
+- Socket.IO handles real-time delivery, typing indicators, and presence. FCM handles offline push.
 
-### `POST /notify`
-Send FCM push notification.
+## Migration
 
-**Body:**
-```json
+1. Stop any running `quidec-relay` instance.
+2. Deploy `quidec_server` — it includes FCM push via `FCM_SERVER_KEY` env var.
+3. Archive or delete this repo.
+
+## Original usage
+
+```
+POST /notify
 {
-  "to": "recipientUid",
-  "fromName": "Preet",
+  "to": "<fcm_token>",
+  "fromName": "Alice",
   "type": "text" | "image" | "video" | "audio"
 }
 ```
 
-**Response:**
-```json
-{ "sent": true }
-// or
-{ "sent": false, "reason": "no_fcm_token" }
-```
-
-## Deploy to Render
-
-1. Push to GitHub
-2. Create new Web Service on Render
-3. Connect repo, set:
-   - **Runtime:** Node
-   - **Build:** `npm install`
-   - **Start:** `node server.js`
-   - **Plan:** Free
-4. Add secret file: `serviceAccountKey.json` (from Firebase Console → Service Accounts)
-5. Deploy
-
-## Keep Warm (Cron Job)
-
-Render free tier spins down after 15 min inactivity. Set up a cron job to ping `GET /` every 10 minutes:
-
-- **cron-job.org** (free): `*/10 * * * *` → `https://your-app.onrender.com/`
-- **UptimeRobot** (free): HTTP monitor every 5 min
+No longer called by the client.
