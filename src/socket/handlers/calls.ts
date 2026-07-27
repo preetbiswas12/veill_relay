@@ -1,5 +1,6 @@
 import { Server, Socket } from 'socket.io';
 import pool from '../../database/pool.js';
+import { fcmService } from '../../services/fcm.js';
 
 interface CallOfferData {
   recipientId: number;
@@ -24,7 +25,7 @@ interface CallEndData {
 
 /**
  * WebRTC signaling via Socket.IO.
- * OpenVidu handles NAT traversal and relay when direct peer connection fails.
+ * LiveKit handles NAT traversal and relay for actual media.
  * This is the fallback signaling path for direct connections.
  */
 export function registerCallHandlers(
@@ -36,11 +37,36 @@ export function registerCallHandlers(
   const username = socket.data.username as string;
 
   // Call offer
-  socket.on('call-offer', (data: CallOfferData) => {
+  socket.on('call-offer', async (data: CallOfferData) => {
     const { recipientId, callType, offer } = data;
     const recipientSockets = connectedUsers.get(recipientId);
 
     if (!recipientSockets || recipientSockets.size === 0) {
+      // Recipient offline — send FCM push for incoming call
+      try {
+        const recipientResult = await pool.query(
+          'SELECT fcm_token, display_name, username FROM users WHERE id = $1',
+          [recipientId]
+        );
+
+        if (recipientResult.rows.length > 0) {
+          const recipient = recipientResult.rows[0];
+          if (recipient.fcm_token) {
+            const senderResult = await pool.query(
+              'SELECT display_name, username FROM users WHERE id = $1',
+              [userId]
+            );
+            const callerName = senderResult.rows.length > 0
+              ? senderResult.rows[0].display_name || senderResult.rows[0].username
+              : 'Someone';
+
+            await fcmService.sendCallPush(recipient.fcm_token, callerName, callType);
+          }
+        }
+      } catch (fcmErr: any) {
+        console.error('[Calls] FCM push failed:', fcmErr.message);
+      }
+
       socket.emit('call-user-offline', { recipientId });
       return;
     }

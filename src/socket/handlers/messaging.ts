@@ -1,5 +1,6 @@
 import { Server, Socket } from 'socket.io';
 import pool from '../../database/pool.js';
+import { fcmService } from '../../services/fcm.js';
 
 interface SendMessageData {
   recipientId: number;
@@ -106,8 +107,35 @@ export function registerMessagingHandlers(
           [message.id]
         ).catch(() => {});
       } else {
-        // Recipient offline — FCM push handled by the caller (client triggers via REST)
-        // Server can also send FCM here if desired
+        // Recipient offline — send FCM push notification
+        try {
+          const recipientResult = await pool.query(
+            'SELECT fcm_token, display_name FROM users WHERE id = $1',
+            [recipientId]
+          );
+
+          if (recipientResult.rows.length > 0) {
+            const recipient = recipientResult.rows[0];
+            if (recipient.fcm_token) {
+              // Get sender's display name
+              const senderResult = await pool.query(
+                'SELECT display_name, username FROM users WHERE id = $1',
+                [userId]
+              );
+              const senderName = senderResult.rows.length > 0
+                ? senderResult.rows[0].display_name || senderResult.rows[0].username
+                : 'Someone';
+
+              await fcmService.sendMessagePush(
+                recipient.fcm_token,
+                senderName,
+                contentType
+              );
+            }
+          }
+        } catch (fcmErr: any) {
+          console.error('[Messaging] FCM push failed:', fcmErr.message);
+        }
       }
 
       // Acknowledge to sender
