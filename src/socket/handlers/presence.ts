@@ -18,7 +18,7 @@ export function registerPresenceHandlers(
   socket.on('get-online-users', async (ack?: (response: any) => void) => {
     try {
       const result = await pool.query(
-        'SELECT id, username, display_name, avatar_url, is_online, last_seen_at FROM users WHERE is_online = true'
+        'SELECT id, username, display_name, avatar_url, is_online, last_seen_at FROM users WHERE is_online = 1'
       );
 
       ack?.({
@@ -44,7 +44,7 @@ export function registerPresenceHandlers(
       if (!data.token) return;
 
       await pool.query(
-        'UPDATE users SET fcm_token = $1 WHERE id = $2',
+        'UPDATE users SET fcm_token = ? WHERE id = ?',
         [data.token, userId]
       );
 

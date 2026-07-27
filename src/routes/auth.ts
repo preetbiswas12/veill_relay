@@ -15,7 +15,7 @@ router.post('/register', async (req: Request, res: Response) => {
 
     const result = await pool.query(
       `INSERT INTO users (firebase_uid, username, display_name)
-       VALUES ($1, $2, $3)
+       VALUES (?, ?, ?)
        RETURNING id, firebase_uid, username, display_name`,
       [firebaseUid, username, displayName || username]
     );
@@ -37,7 +37,7 @@ router.post('/register', async (req: Request, res: Response) => {
       },
     });
   } catch (err: any) {
-    if (err.code === '23505') {
+    if (err.code === 'SQLITE_CONSTRAINT' || err.message?.includes('UNIQUE constraint')) {
       return res.status(409).json({ error: 'User already exists' });
     }
     console.error('[Auth] register error:', err.message);
@@ -55,7 +55,7 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     const result = await pool.query(
-      'SELECT id, firebase_uid, username, display_name FROM users WHERE firebase_uid = $1',
+      'SELECT id, firebase_uid, username, display_name FROM users WHERE firebase_uid = ?',
       [firebaseUid]
     );
 
@@ -89,7 +89,7 @@ router.post('/login', async (req: Request, res: Response) => {
 router.get('/me', authMiddleware, async (req: Request, res: Response) => {
   try {
     const result = await pool.query(
-      'SELECT id, firebase_uid, username, display_name, avatar_url, is_online, last_seen_at FROM users WHERE id = $1',
+      'SELECT id, firebase_uid, username, display_name, avatar_url, is_online, last_seen_at FROM users WHERE id = ?',
       [req.auth!.userId]
     );
 
@@ -124,11 +124,11 @@ router.get('/search', authMiddleware, async (req: Request, res: Response) => {
     const result = await pool.query(
       `SELECT id, username, display_name, avatar_url, is_online
        FROM users
-       WHERE username ILIKE $1 OR display_name ILIKE $1
+       WHERE username LIKE ? COLLATE NOCASE OR display_name LIKE ? COLLATE NOCASE
        ORDER BY username ASC
        LIMIT 20`,
-      [`%${query}%`]
-    );
+      [`%${query}%`, `%${query}%`
+    ]);
 
     res.json({
       users: result.rows.map((u) => ({

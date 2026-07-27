@@ -1,12 +1,13 @@
 import dotenv from 'dotenv';
+import path from 'path';
 dotenv.config();
 
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-me',
 
-  // PostgreSQL
-  databaseUrl: process.env.DATABASE_URL || 'postgresql://localhost:5432/veill',
+  // SQLite database path
+  dbPath: process.env.DB_PATH || path.join(process.cwd(), 'veill.db'),
 
   // LiveKit (WebRTC calls via DGX + Cloudflare Tunnel)
   livekitUrl: process.env.LIVEKIT_URL || 'wss://preetllm.qzz.io',

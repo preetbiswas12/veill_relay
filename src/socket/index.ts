@@ -64,7 +64,7 @@ export function setupSocketIO(httpServer: HttpServer): Server {
 
     // Update DB presence
     await pool.query(
-      'UPDATE users SET is_online = true, last_seen_at = NOW() WHERE id = $1',
+      'UPDATE users SET is_online = 1, last_seen_at = datetime(\'now\') WHERE id = ?',
       [userId]
     ).catch(() => {});
 
@@ -91,7 +91,7 @@ export function setupSocketIO(httpServer: HttpServer): Server {
         if (sockets.size === 0) {
           connectedUsers.delete(userId);
           await pool.query(
-            'UPDATE users SET is_online = false, last_seen_at = NOW() WHERE id = $1',
+            'UPDATE users SET is_online = 0, last_seen_at = datetime(\'now\') WHERE id = ?',
             [userId]
           ).catch(() => {});
           io.emit('user-online', { userId, username, online: false });

@@ -22,7 +22,7 @@ interface MessageRow {
   content: string;
   media_url: string;
   temp_id: string;
-  is_deleted: boolean;
+  is_deleted: number;
   created_at: string;
 }
 
@@ -54,14 +54,14 @@ export function registerMessagingHandlers(
       const [user1Id, user2Id] = canonicalOrder(userId, recipientId);
 
       let convResult = await pool.query(
-        'SELECT id FROM conversations WHERE user1_id = $1 AND user2_id = $2',
+        'SELECT id FROM conversations WHERE user1_id = ? AND user2_id = ?',
         [user1Id, user2Id]
       );
 
       let conversationId: number;
       if (convResult.rows.length === 0) {
         const newConv = await pool.query(
-          'INSERT INTO conversations (user1_id, user2_id) VALUES ($1, $2) RETURNING id',
+          'INSERT INTO conversations (user1_id, user2_id) VALUES (?, ?) RETURNING id',
           [user1Id, user2Id]
         );
         conversationId = newConv.rows[0].id;
@@ -72,7 +72,7 @@ export function registerMessagingHandlers(
       // Insert message
       const msgResult = await pool.query(
         `INSERT INTO messages (conversation_id, sender_id, content_type, content, media_url, temp_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
+         VALUES (?, ?, ?, ?, ?, ?)
          RETURNING id, conversation_id, sender_id, content_type, content, media_url, temp_id, is_deleted, created_at`,
         [conversationId, userId, contentType, content, mediaUrl, tempId]
       );
@@ -81,7 +81,7 @@ export function registerMessagingHandlers(
 
       // Update conversation timestamp
       await pool.query(
-        'UPDATE conversations SET updated_at = NOW() WHERE id = $1',
+        'UPDATE conversations SET updated_at = datetime(\'now\') WHERE id = ?',
         [conversationId]
       ).catch(() => {});
 
@@ -103,14 +103,14 @@ export function registerMessagingHandlers(
 
         // Mark as delivered
         await pool.query(
-          'UPDATE messages SET delivered_at = NOW() WHERE id = $1',
+          'UPDATE messages SET delivered_at = datetime(\'now\') WHERE id = ?',
           [message.id]
         ).catch(() => {});
       } else {
         // Recipient offline — send FCM push notification
         try {
           const recipientResult = await pool.query(
-            'SELECT fcm_token, display_name FROM users WHERE id = $1',
+            'SELECT fcm_token, display_name FROM users WHERE id = ?',
             [recipientId]
           );
 
@@ -119,7 +119,7 @@ export function registerMessagingHandlers(
             if (recipient.fcm_token) {
               // Get sender's display name
               const senderResult = await pool.query(
-                'SELECT display_name, username FROM users WHERE id = $1',
+                'SELECT display_name, username FROM users WHERE id = ?',
                 [userId]
               );
               const senderName = senderResult.rows.length > 0
@@ -161,7 +161,7 @@ export function registerMessagingHandlers(
       const [user1Id, user2Id] = canonicalOrder(userId, withUserId);
 
       const convResult = await pool.query(
-        'SELECT id FROM conversations WHERE user1_id = $1 AND user2_id = $2',
+        'SELECT id FROM conversations WHERE user1_id = ? AND user2_id = ?',
         [user1Id, user2Id]
       );
 
@@ -172,15 +172,16 @@ export function registerMessagingHandlers(
 
       const conversationId = convResult.rows[0].id;
 
+      // Build query with ? params
       let query = `
         SELECT id, conversation_id, sender_id, content_type, content, media_url, temp_id, is_deleted, created_at, read_at
         FROM messages
-        WHERE conversation_id = $1 AND is_deleted = false
+        WHERE conversation_id = ? AND is_deleted = 0
       `;
       const params: any[] = [conversationId];
 
       if (before) {
-        query += ' AND id < $2';
+        query += ' AND id < ?';
         params.push(before);
       }
 
@@ -216,7 +217,7 @@ export function registerMessagingHandlers(
       const { messageId } = data;
 
       const result = await pool.query(
-        'UPDATE messages SET is_deleted = true WHERE id = $1 AND sender_id = $2 RETURNING conversation_id',
+        'UPDATE messages SET is_deleted = 1 WHERE id = ? AND sender_id = ? RETURNING conversation_id',
         [messageId, userId]
       );
 
@@ -225,7 +226,7 @@ export function registerMessagingHandlers(
 
         // Find the other user in the conversation
         const convResult = await pool.query(
-          'SELECT user1_id, user2_id FROM conversations WHERE id = $1',
+          'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
           [conversationId]
         );
 
@@ -252,14 +253,14 @@ export function registerMessagingHandlers(
       const { conversationId } = data;
 
       await pool.query(
-        `UPDATE messages SET read_at = NOW()
-         WHERE conversation_id = $1 AND sender_id != $2 AND read_at IS NULL AND is_deleted = false`,
+        `UPDATE messages SET read_at = datetime('now')
+         WHERE conversation_id = ? AND sender_id != ? AND read_at IS NULL AND is_deleted = 0`,
         [conversationId, userId]
       );
 
       // Notify the other user in the conversation
       const convResult = await pool.query(
-        'SELECT user1_id, user2_id FROM conversations WHERE id = $1',
+        'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
         [conversationId]
       );
 

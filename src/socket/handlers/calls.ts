@@ -45,7 +45,7 @@ export function registerCallHandlers(
       // Recipient offline — send FCM push for incoming call
       try {
         const recipientResult = await pool.query(
-          'SELECT fcm_token, display_name, username FROM users WHERE id = $1',
+          'SELECT fcm_token, display_name, username FROM users WHERE id = ?',
           [recipientId]
         );
 
@@ -53,7 +53,7 @@ export function registerCallHandlers(
           const recipient = recipientResult.rows[0];
           if (recipient.fcm_token) {
             const senderResult = await pool.query(
-              'SELECT display_name, username FROM users WHERE id = $1',
+              'SELECT display_name, username FROM users WHERE id = ?',
               [userId]
             );
             const callerName = senderResult.rows.length > 0
@@ -83,7 +83,7 @@ export function registerCallHandlers(
     // Log call attempt
     pool.query(
       `INSERT INTO messages (conversation_id, sender_id, content_type, content)
-       VALUES (0, $1, 'call', $2)`,
+       VALUES (0, ?, 'call', ?)`,
       [userId, JSON.stringify({ type: 'call-start', callType, target: recipientId })]
     ).catch(() => {});
   });

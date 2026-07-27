@@ -1,5 +1,5 @@
 import { Server, Socket } from 'socket.io';
-import { openviduService } from '../../services/openvidu.js';
+import pool from '../../database/pool.js';
 
 interface ChunkData {
   chunkId: string;
@@ -25,7 +25,7 @@ interface ChunkDeleteData {
 
 /**
  * Media chunk relay via Socket.IO binary transfer.
- * Stores metadata in PostgreSQL; chunks are relayed in real-time.
+ * Stores metadata in SQLite; chunks are relayed in real-time.
  * Images <2MB and audio <5MB go through here; video >5MB goes via WebRTC data channel.
  */
 export function registerMediaHandlers(
@@ -40,12 +40,11 @@ export function registerMediaHandlers(
     try {
       const { chunkId, messageId, recipientUid, chunkIndex, totalChunks, mimeType, fileName, fileSize } = data;
 
-      // Store chunk metadata in DB (actual binary stored temporarily in memory or filesystem)
       const storagePath = `chunks/${messageId}/${chunkIndex}`;
 
       await pool.query(
         `INSERT INTO media_chunks (chunk_id, message_id, sender_uid, recipient_uid, chunk_index, total_chunks, mime_type, file_name, file_size, storage_path)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [chunkId, messageId, String(userId), recipientUid, chunkIndex, totalChunks, mimeType, fileName, fileSize, storagePath]
       );
 
@@ -79,11 +78,11 @@ export function registerMediaHandlers(
     try {
       const { messageId, chunkIndex } = data;
 
-      let query = 'SELECT * FROM media_chunks WHERE message_id = $1';
+      let query = 'SELECT * FROM media_chunks WHERE message_id = ?';
       const params: any[] = [messageId];
 
       if (chunkIndex !== undefined) {
-        query += ' AND chunk_index = $2';
+        query += ' AND chunk_index = ?';
         params.push(chunkIndex);
       }
 
@@ -111,13 +110,9 @@ export function registerMediaHandlers(
   socket.on('chunk-delete', async (data: ChunkDeleteData) => {
     try {
       const { messageId } = data;
-      await pool.query('DELETE FROM media_chunks WHERE message_id = $1', [messageId]);
+      await pool.query('DELETE FROM media_chunks WHERE message_id = ?', [messageId]);
     } catch (err: any) {
       console.error('[Media] chunk-delete error:', err.message);
     }
   });
 }
-
-// Need this import at top level — but we reference pool which is imported in the handlers
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import pool from '../../database/pool.js';

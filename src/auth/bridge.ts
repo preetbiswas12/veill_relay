@@ -1,4 +1,3 @@
-import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import pool from '../database/pool.js';
 import { signToken, AuthPayload } from './middleware.js';
@@ -6,14 +5,14 @@ import { signToken, AuthPayload } from './middleware.js';
 /**
  * Ensures a valid server JWT exists for the given Firebase UID.
  * Flow:
- *   1. Validate stored token via /api/auth/me
- *   2. If invalid → try register with Firebase UID as username
- *   3. If 409 (exists) → login with Firebase UID as username
+ *   1. Check if user exists in DB
+ *   2. If yes → sign token
+ *   3. If no → register new user, then sign token
  */
 export async function ensureServerAuth(firebaseUid: string): Promise<string> {
-  // Try existing token first from DB
+  // Try existing user first
   const existing = await pool.query(
-    'SELECT id, firebase_uid, username FROM users WHERE firebase_uid = $1',
+    'SELECT id, firebase_uid, username FROM users WHERE firebase_uid = ?',
     [firebaseUid]
   );
 
@@ -28,11 +27,10 @@ export async function ensureServerAuth(firebaseUid: string): Promise<string> {
   }
 
   // Register new user
-  const syntheticPassword = `firebase_${firebaseUid}`;
   try {
     const result = await pool.query(
       `INSERT INTO users (firebase_uid, username, display_name)
-       VALUES ($1, $2, $3)
+       VALUES (?, ?, ?)
        RETURNING id, firebase_uid, username`,
       [firebaseUid, firebaseUid, `User ${firebaseUid.slice(0, 8)}`]
     );
@@ -45,10 +43,10 @@ export async function ensureServerAuth(firebaseUid: string): Promise<string> {
     };
     return signToken(payload);
   } catch (err: any) {
-    // 23505 = unique_violation — user already exists, just read it
-    if (err.code === '23505') {
+    // SQLite unique constraint error
+    if (err.code === 'SQLITE_CONSTRAINT' || err.message?.includes('UNIQUE constraint')) {
       const result = await pool.query(
-        'SELECT id, firebase_uid, username FROM users WHERE firebase_uid = $1',
+        'SELECT id, firebase_uid, username FROM users WHERE firebase_uid = ?',
         [firebaseUid]
       );
       const user = result.rows[0];
