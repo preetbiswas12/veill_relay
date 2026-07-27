@@ -1,7 +1,7 @@
 {
   "name": "veill-server",
   "version": "2.0.0",
-  "description": "Veill real-time messaging server — Socket.IO + PostgreSQL + OpenVidu + FCM",
+  "description": "Veill real-time messaging server — Socket.IO + PostgreSQL + LiveKit + FCM",
   "main": "dist/server.js",
   "type": "module",
   "scripts": {

@@ -8,9 +8,10 @@ export const config = {
   // PostgreSQL
   databaseUrl: process.env.DATABASE_URL || 'postgresql://localhost:5432/veill',
 
-  // OpenVidu (optional — server gracefully skips if empty)
-  openviduUrl: process.env.OPENVIDU_URL || '',
-  openviduSecret: process.env.OPENVIDU_SECRET || '',
+  // LiveKit (WebRTC calls via DGX + Cloudflare Tunnel)
+  livekitUrl: process.env.LIVEKIT_URL || 'wss://preetllm.qzz.io',
+  livekitApiKey: process.env.LIVEKIT_API_KEY || 'devkey',
+  livekitApiSecret: process.env.LIVEKIT_API_SECRET || 'secret',
 
   // Firebase Admin (for FCM push + optional token verification)
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT || '',

@@ -41,7 +41,7 @@ async function main() {
   server.listen(config.port, () => {
     console.log(`[Server] Veill server running on port ${config.port}`);
     console.log(`[Server] Database: connected`);
-    console.log(`[Server] OpenVidu: ${config.openviduUrl ? 'configured' : 'not configured (optional)'}`);
+    console.log(`[Server] LiveKit: ${config.livekitUrl}`);
     console.log(`[Server] FCM: ${config.firebaseServiceAccount ? 'configured' : 'not configured (optional)'}`);
   });
 
