@@ -38,15 +38,19 @@ export function registerPresenceHandlers(
     }
   });
 
-  // Client updates their FCM token
-  socket.on('update-fcm-token', async (data: { fcmToken: string }) => {
+  // Client registers FCM device token (matches client's 'register-device' event)
+  socket.on('register-device', async (data: { token: string; platform?: string; appVersion?: string }) => {
     try {
+      if (!data.token) return;
+
       await pool.query(
         'UPDATE users SET fcm_token = $1 WHERE id = $2',
-        [data.fcmToken, userId]
+        [data.token, userId]
       );
+
+      console.log(`[Presence] FCM token registered for ${username} (platform: ${data.platform || 'unknown'})`);
     } catch (err: any) {
-      console.error('[Presence] update-fcm-token error:', err.message);
+      console.error('[Presence] register-device error:', err.message);
     }
   });
 }
