@@ -37,10 +37,21 @@ export const config = {
   // Firebase Admin (for FCM push + optional token verification)
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT || '',
 
-  // CORS — never default to wildcard in production
-  corsOrigin: isProd
-    ? requireEnv('CORS_ORIGIN')
-    : (process.env.CORS_ORIGIN || 'http://localhost:5173'),
+  // CORS — supports comma-separated list of allowed origins
+  corsOrigin: (() => {
+    const raw = isProd
+      ? requireEnv('CORS_ORIGIN')
+      : (process.env.CORS_ORIGIN || 'http://localhost:5173');
+    const origins = raw.split(',').map((s) => s.trim());
+    if (origins.length === 1) return origins[0];
+    return (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || origins.includes(origin)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Not allowed by CORS'));
+      }
+    };
+  })(),
 
   // .veill file storage
   mediaDir: process.env.MEDIA_DIR || path.join(process.cwd(), 'media'),
