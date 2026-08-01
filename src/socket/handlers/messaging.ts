@@ -198,7 +198,8 @@ export function registerMessagingHandlers(
   });
 
   // ─── Fetch Pending Payloads (Offline → Online) ─────────────────────────
-  socket.on('get-pending', async (ack?: (response: Record<string, unknown>) => void) => {
+  socket.on('get-pending', async (dataOrAck?: unknown) => {
+    const ack = typeof dataOrAck === 'function' ? dataOrAck : undefined;
     try {
       const result = await pool.query(
         `SELECT id, message_id, sender_id, encrypted_payload, payload_hash, content_type, temp_id, chunk_count, total_size, created_at

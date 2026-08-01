@@ -17,7 +17,8 @@ export function registerPresenceHandlers(
   const username = socket.data.username as string;
 
   // Client requests current online friends (not all users — privacy)
-  socket.on('get-online-users', async (ack?: (response: Record<string, unknown>) => void) => {
+  socket.on('get-online-users', async (dataOrAck?: unknown) => {
+    const ack = typeof dataOrAck === 'function' ? dataOrAck : undefined;
     try {
       const result = await pool.query(
         `SELECT u.id, u.username, u.display_name, u.avatar_url, u.is_online, u.last_seen_at
@@ -91,7 +92,8 @@ export function registerPresenceHandlers(
   });
 
   // ─── Get Contacts Status (bulk) ──────────────────────────────────────
-  socket.on('get-contacts-status', async (ack?: (response: Record<string, unknown>) => void) => {
+  socket.on('get-contacts-status', async (dataOrAck?: unknown) => {
+    const ack = typeof dataOrAck === 'function' ? dataOrAck : undefined;
     try {
       // Get only friends of this user (bidirectional friendship)
       const result = await pool.query(
