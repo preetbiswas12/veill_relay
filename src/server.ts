@@ -23,8 +23,12 @@ async function main() {
   // Trust first proxy (required for req.ip behind reverse proxy)
   app.set('trust proxy', 1);
 
-  // Security headers
-  app.use(helmet());
+  // Security headers — API-only server, disable CSP (not serving HTML)
+  // and crossOriginEmbedderPolicy (blocks Firebase Auth popups)
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }));
 
   // Middleware
   app.use(cors({ origin: config.corsOrigin }));
