@@ -9,6 +9,7 @@ export interface AuthPayload {
 }
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
       auth?: AuthPayload;
@@ -25,7 +26,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 
   try {
     const token = header.slice(7);
-    const payload = jwt.verify(token, config.jwtSecret) as AuthPayload;
+    const payload = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as AuthPayload;
     req.auth = payload;
     next();
   } catch {
@@ -34,5 +35,5 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 export function signToken(payload: AuthPayload): string {
-  return jwt.sign(payload, config.jwtSecret, { expiresIn: '30d' });
+  return jwt.sign(payload, config.jwtSecret, { algorithm: 'HS256', expiresIn: '7d' });
 }

@@ -1,282 +1,402 @@
 import { Server, Socket } from 'socket.io';
 import pool from '../../database/pool.js';
 import { fcmService } from '../../services/fcm.js';
+import crypto from 'crypto';
+import { logger } from '../../utils/logger.js';
+
+const MAX_ENCRYPTED_PAYLOAD_LENGTH = 65536; // 64KB max encrypted payload
 
 interface SendMessageData {
-  recipientId: number;
-  content: string;
-  contentType?: string;
-  mediaUrl?: string;
+  recipientId: number | string;  // Firebase UID (string) or legacy numeric ID
+  encryptedPayload: string;   // Client-side encrypted blob (server never decrypts)
+  payloadHash: string;        // SHA-256 of encrypted payload for integrity
+  contentType: string;        // text | image | video | audio | file
   tempId?: string;
+  chunkCount?: number;        // 1 for non-chunked, >1 for media
+  totalSize?: number;         // Original unencrypted size
 }
 
-interface DeleteMessageData {
-  messageId: number;
-}
-
-interface MessageRow {
-  id: number;
-  conversation_id: number;
-  sender_id: number;
-  content_type: string;
-  content: string;
-  media_url: string;
-  temp_id: string;
-  is_deleted: number;
-  created_at: string;
+interface ReceiptData {
+  messageId: string;
+  recipientId?: string;       // Firebase UID of recipient (for delivery receipts)
+  status: 'delivered' | 'read';
+  readBy?: number;            // numeric userId of reader
+  conversationId?: string;
+  deliveredAt?: number;
+  readAt?: number;
 }
 
 /**
- * Canonical conversation ordering: smaller userId is always user1.
+ * Relay-only messaging handler.
+ *
+ * The server NEVER stores message content. It only:
+ *   1. Relays encrypted payloads to online recipients
+ *   2. Temporarily holds encrypted payloads for offline recipients
+ *      (deleted once the recipient fetches them)
+ *   3. Routes read/delivery receipts (also encrypted)
+ *
+ * The encryptedPayload is an opaque blob — the server cannot decrypt it.
+ * Notifications use silent push (data-only FCM) so the server never
+ * sees plaintext message content.
  */
-function canonicalOrder(a: number, b: number): [number, number] {
-  return a < b ? [a, b] : [b, a];
-}
-
 export function registerMessagingHandlers(
   io: Server,
   socket: Socket,
-  connectedUsers: Map<number, Set<string>>
+  connectedUsers: Map<number, Set<string>>,
+  firebaseToUserId: Map<string, number>
 ): void {
   const userId = socket.data.userId as number;
+  const firebaseUid = socket.data.firebaseUid as string;
 
-  // Send a message
-  socket.on('send-message', async (data: SendMessageData, ack?: (response: any) => void) => {
+  // Helper: resolve recipient — accepts Firebase UID (string) or numeric ID
+  function resolveRecipientId(recipientId: number | string): number | null {
+    if (typeof recipientId === 'number' && recipientId > 0) return recipientId;
+    if (typeof recipientId === 'string' && recipientId.length > 0) {
+      const numericId = firebaseToUserId.get(recipientId);
+      if (numericId != null) return numericId;
+    }
+    return null;
+  }
+
+  // ─── Send Message (Relay Only) ─────────────────────────────────────────
+  socket.on('send-message', async (data: SendMessageData, ack?: (response: Record<string, unknown>) => void) => {
     try {
-      const { recipientId, content, contentType = 'text', mediaUrl = '', tempId = '' } = data;
+      const {
+        recipientId,
+        encryptedPayload,
+        payloadHash,
+        contentType = 'text',
+        tempId = '',
+        chunkCount = 1,
+        totalSize = 0,
+      } = data;
 
-      if (!recipientId || !content) {
-        ack?.({ success: false, error: 'recipientId and content required' });
+      // --- Input validation ---
+      if (!recipientId || !encryptedPayload) {
+        ack?.({ success: false, error: 'recipientId and encryptedPayload required' });
         return;
       }
 
-      // Get or create canonical conversation
-      const [user1Id, user2Id] = canonicalOrder(userId, recipientId);
-
-      let convResult = await pool.query(
-        'SELECT id FROM conversations WHERE user1_id = ? AND user2_id = ?',
-        [user1Id, user2Id]
-      );
-
-      let conversationId: number;
-      if (convResult.rows.length === 0) {
-        const newConv = await pool.query(
-          'INSERT INTO conversations (user1_id, user2_id) VALUES (?, ?) RETURNING id',
-          [user1Id, user2Id]
-        );
-        conversationId = newConv.rows[0].id;
-      } else {
-        conversationId = convResult.rows[0].id;
+      const resolvedRecipientId = resolveRecipientId(recipientId);
+      if (resolvedRecipientId == null) {
+        ack?.({ success: false, error: 'Invalid recipientId — could not resolve to numeric ID' });
+        return;
       }
 
-      // Insert message
-      const msgResult = await pool.query(
-        `INSERT INTO messages (conversation_id, sender_id, content_type, content, media_url, temp_id)
-         VALUES (?, ?, ?, ?, ?, ?)
-         RETURNING id, conversation_id, sender_id, content_type, content, media_url, temp_id, is_deleted, created_at`,
-        [conversationId, userId, contentType, content, mediaUrl, tempId]
+      if (typeof encryptedPayload !== 'string' || encryptedPayload.length > MAX_ENCRYPTED_PAYLOAD_LENGTH) {
+        ack?.({ success: false, error: `Payload too large. Maximum ${MAX_ENCRYPTED_PAYLOAD_LENGTH} chars` });
+        return;
+      }
+
+      if (!payloadHash || typeof payloadHash !== 'string') {
+        ack?.({ success: false, error: 'payloadHash required (SHA-256 of encrypted payload)' });
+        return;
+      }
+
+      // Verify payload integrity (timing-safe comparison)
+      const computedHash = crypto.createHash('sha256').update(encryptedPayload).digest('hex');
+      const hashMatch = crypto.timingSafeEqual(
+        Buffer.from(computedHash, 'hex'),
+        Buffer.from(payloadHash, 'hex')
       );
+      if (!hashMatch) {
+        ack?.({ success: false, error: 'Payload integrity check failed' });
+        return;
+      }
 
-      const message: MessageRow = msgResult.rows[0];
+      // Generate a server-assigned message ID (timestamp-based)
+      const messageId = `msg_${userId}_${resolvedRecipientId}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
-      // Update conversation timestamp
+      // Update conversation metadata (for contact list ordering)
+      const [user1Id, user2Id] = userId < resolvedRecipientId
+        ? [userId, resolvedRecipientId]
+        : [resolvedRecipientId, userId];
+
       await pool.query(
-        'UPDATE conversations SET updated_at = datetime(\'now\') WHERE id = ?',
-        [conversationId]
+        `INSERT INTO conversations (user1_id, user2_id, updated_at)
+         VALUES (?, ?, datetime('now'))
+         ON CONFLICT (user1_id, user2_id) DO UPDATE SET updated_at = datetime('now')`,
+        [user1Id, user2Id]
       ).catch(() => {});
 
-      // Deliver to recipient if online
-      const recipientSockets = connectedUsers.get(recipientId);
+      // --- Relay to recipient ---
+      const recipientSockets = connectedUsers.get(resolvedRecipientId);
+
       if (recipientSockets && recipientSockets.size > 0) {
+        // Recipient online — relay immediately
         for (const socketId of recipientSockets) {
           io.to(socketId).emit('new-message', {
-            id: message.id,
-            conversationId: message.conversation_id,
-            senderId: message.sender_id,
-            contentType: message.content_type,
-            content: message.content,
-            mediaUrl: message.media_url,
-            tempId: message.temp_id,
-            createdAt: message.created_at,
+            messageId,
+            senderId: userId,
+            encryptedPayload,
+            payloadHash,
+            contentType,
+            tempId,
+            chunkCount,
+            totalSize,
+            timestamp: Date.now(),
           });
         }
 
-        // Mark as delivered
-        await pool.query(
-          'UPDATE messages SET delivered_at = datetime(\'now\') WHERE id = ?',
-          [message.id]
-        ).catch(() => {});
+        // Acknowledge to sender
+        ack?.({
+          success: true,
+          messageId,
+          status: 'delivered',
+          tempId,
+          timestamp: Date.now(),
+        });
       } else {
-        // Recipient offline — send FCM push notification
+        // Recipient offline — store encrypted payload temporarily
+        await pool.query(
+          `INSERT INTO pending_payloads (message_id, sender_id, recipient_id, encrypted_payload, payload_hash, content_type, temp_id, chunk_count, total_size)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [messageId, userId, resolvedRecipientId, encryptedPayload, payloadHash, contentType, tempId, chunkCount, totalSize]
+        ).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error('[Messaging]', `Failed to store pending payload: ${msg}`);
+        });
+
+        // Send silent push notification (data-only, NO plaintext)
         try {
           const recipientResult = await pool.query(
-            'SELECT fcm_token, display_name FROM users WHERE id = ?',
-            [recipientId]
+            'SELECT fcm_token FROM users WHERE id = ?',
+            [resolvedRecipientId]
           );
 
-          if (recipientResult.rows.length > 0) {
-            const recipient = recipientResult.rows[0];
-            if (recipient.fcm_token) {
-              // Get sender's display name
-              const senderResult = await pool.query(
-                'SELECT display_name, username FROM users WHERE id = ?',
-                [userId]
-              );
-              const senderName = senderResult.rows.length > 0
-                ? senderResult.rows[0].display_name || senderResult.rows[0].username
-                : 'Someone';
-
-              await fcmService.sendMessagePush(
-                recipient.fcm_token,
-                senderName,
-                contentType
-              );
-            }
+          if (recipientResult.rows.length > 0 && recipientResult.rows[0].fcm_token) {
+            await fcmService.sendSilentPush(
+              recipientResult.rows[0].fcm_token,
+              {
+                type: 'new-message',
+                messageId,
+                senderId: String(userId),
+                payloadHash,
+                contentType,
+              }
+            );
           }
-        } catch (fcmErr: any) {
-          console.error('[Messaging] FCM push failed:', fcmErr.message);
+        } catch (fcmErr: unknown) {
+          const msg = fcmErr instanceof Error ? fcmErr.message : String(fcmErr);
+          logger.error('[Messaging]', `Silent push failed: ${msg}`);
         }
-      }
 
-      // Acknowledge to sender
-      ack?.({
-        success: true,
-        message: {
-          id: message.id,
-          conversationId: message.conversation_id,
-          tempId: message.temp_id,
-          createdAt: message.created_at,
-        },
-      });
-    } catch (err: any) {
-      console.error('[Messaging] send-message error:', err.message);
+        // Acknowledge to sender (queued, not yet delivered)
+        ack?.({
+          success: true,
+          messageId,
+          status: 'queued',
+          tempId,
+          timestamp: Date.now(),
+        });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `send-message error: ${msg}`);
       ack?.({ success: false, error: 'Failed to send message' });
     }
   });
 
-  // Fetch conversation history
-  socket.on('get-messages', async (data: { withUserId: number; before?: number; limit?: number }, ack?: (response: any) => void) => {
+  // ─── Fetch Pending Payloads (Offline → Online) ─────────────────────────
+  socket.on('get-pending', async (ack?: (response: Record<string, unknown>) => void) => {
     try {
-      const { withUserId, before, limit = 50 } = data;
-      const [user1Id, user2Id] = canonicalOrder(userId, withUserId);
-
-      const convResult = await pool.query(
-        'SELECT id FROM conversations WHERE user1_id = ? AND user2_id = ?',
-        [user1Id, user2Id]
+      const result = await pool.query(
+        `SELECT id, message_id, sender_id, encrypted_payload, payload_hash, content_type, temp_id, chunk_count, total_size, created_at
+         FROM pending_payloads
+         WHERE recipient_id = ?
+         ORDER BY created_at ASC`,
+        [userId]
       );
 
-      if (convResult.rows.length === 0) {
-        ack?.({ success: true, messages: [] });
-        return;
+      const pending = result.rows.map((row) => ({
+        messageId: row.message_id,
+        senderId: row.sender_id,
+        encryptedPayload: row.encrypted_payload,
+        payloadHash: row.payload_hash,
+        contentType: row.content_type,
+        tempId: row.temp_id,
+        chunkCount: row.chunk_count,
+        totalSize: row.total_size,
+        timestamp: row.created_at,
+      }));
+
+      ack?.({ success: true, messages: pending });
+
+      // Delete delivered payloads (they've been handed to the client)
+      if (pending.length > 0) {
+        const ids = result.rows.map((r) => r.id);
+        const placeholders = ids.map(() => '?').join(',');
+        await pool.query(
+          `DELETE FROM pending_payloads WHERE id IN (${placeholders})`,
+          ids
+        ).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error('[Messaging]', `Failed to clean pending payloads: ${msg}`);
+        });
       }
-
-      const conversationId = convResult.rows[0].id;
-
-      // Build query with ? params
-      let query = `
-        SELECT id, conversation_id, sender_id, content_type, content, media_url, temp_id, is_deleted, created_at, read_at
-        FROM messages
-        WHERE conversation_id = ? AND is_deleted = 0
-      `;
-      const params: any[] = [conversationId];
-
-      if (before) {
-        query += ' AND id < ?';
-        params.push(before);
-      }
-
-      query += ' ORDER BY created_at DESC';
-      query += ` LIMIT ${Math.min(limit, 100)}`;
-
-      const result = await pool.query(query, params);
-
-      ack?.({
-        success: true,
-        messages: result.rows.reverse().map((m) => ({
-          id: m.id,
-          conversationId: m.conversation_id,
-          senderId: m.sender_id,
-          contentType: m.content_type,
-          content: m.content,
-          mediaUrl: m.media_url,
-          tempId: m.temp_id,
-          isDeleted: m.is_deleted,
-          createdAt: m.created_at,
-          readAt: m.read_at,
-        })),
-      });
-    } catch (err: any) {
-      console.error('[Messaging] get-messages error:', err.message);
-      ack?.({ success: false, error: 'Failed to fetch messages' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `get-pending error: ${msg}`);
+      ack?.({ success: false, error: 'Failed to fetch pending messages' });
     }
   });
 
-  // Delete a message (soft delete)
-  socket.on('delete-message', async (data: DeleteMessageData) => {
+  // ─── Delete Message (Relay to recipient) ───────────────────────────────
+  socket.on('delete-message', async (data: { messageId: string; recipientId: number | string }) => {
     try {
-      const { messageId } = data;
+      const { messageId, recipientId } = data;
+      const resolvedId = resolveRecipientId(recipientId);
 
-      const result = await pool.query(
-        'UPDATE messages SET is_deleted = 1 WHERE id = ? AND sender_id = ? RETURNING conversation_id',
-        [messageId, userId]
-      );
-
-      if (result.rows.length > 0) {
-        const conversationId = result.rows[0].conversation_id;
-
-        // Find the other user in the conversation
-        const convResult = await pool.query(
-          'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
-          [conversationId]
-        );
-
-        if (convResult.rows.length > 0) {
-          const conv = convResult.rows[0];
-          const otherUserId = conv.user1_id === userId ? conv.user2_id : conv.user1_id;
-
-          const otherSockets = connectedUsers.get(otherUserId);
-          if (otherSockets) {
-            for (const socketId of otherSockets) {
-              io.to(socketId).emit('message-deleted', { messageId, conversationId });
-            }
+      // Relay delete notification to recipient
+      if (resolvedId != null) {
+        const recipientSockets = connectedUsers.get(resolvedId);
+        if (recipientSockets) {
+          for (const socketId of recipientSockets) {
+            io.to(socketId).emit('message-deleted', { messageId, deletedBy: userId });
           }
         }
       }
-    } catch (err: any) {
-      console.error('[Messaging] delete-message error:', err.message);
+
+      // Also remove from pending if queued
+      await pool.query(
+        'DELETE FROM pending_payloads WHERE message_id = ? AND sender_id = ?',
+        [messageId, userId]
+      ).catch(() => {});
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `delete-message error: ${msg}`);
     }
   });
 
-  // Mark messages as read
-  socket.on('mark-read', async (data: { conversationId: number }) => {
+  // ─── Read Receipt (Encrypted, Relay Only) ──────────────────────────────
+  socket.on('read-receipt', async (data: ReceiptData) => {
     try {
-      const { conversationId } = data;
+      const { messageId, status } = data;
+      if (!data.recipientId) {
+        logger.warn('[Messaging]', 'read-receipt missing recipientId — dropped');
+        return;
+      }
+      const resolvedRecipientId = resolveRecipientId(data.recipientId);
 
-      await pool.query(
-        `UPDATE messages SET read_at = datetime('now')
-         WHERE conversation_id = ? AND sender_id != ? AND read_at IS NULL AND is_deleted = 0`,
-        [conversationId, userId]
-      );
+      // Relay read receipt to recipient
+      if (resolvedRecipientId != null) {
+        const recipientSockets = connectedUsers.get(resolvedRecipientId);
+        if (recipientSockets) {
+          for (const socketId of recipientSockets) {
+            io.to(socketId).emit('read-receipt', {
+              messageId,
+              status,
+              readBy: userId,
+              timestamp: Date.now(),
+            });
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `read-receipt error: ${msg}`);
+    }
+  });
 
-      // Notify the other user in the conversation
-      const convResult = await pool.query(
-        'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
-        [conversationId]
-      );
+  // ─── Mark Read (Relay to other party) ──────────────────────────────────
+  socket.on('mark-read', async (data: { chatId: string; lastMessageId: string }) => {
+    try {
+      const { chatId, lastMessageId } = data;
 
-      if (convResult.rows.length > 0) {
-        const conv = convResult.rows[0];
-        const otherUserId = conv.user1_id === userId ? conv.user2_id : conv.user1_id;
+      // chatId format: "firebaseUid1_firebaseUid2" (sorted alphabetically)
+      const parts = chatId.split('_');
+      if (parts.length !== 2) return;
 
+      const [uid1, uid2] = parts;
+      // Validate sender is a participant in this conversation
+      if (uid1 !== firebaseUid && uid2 !== firebaseUid) {
+        logger.warn('[Messaging]', `mark-read: sender ${firebaseUid} not in chatId ${chatId} — rejected`);
+        return;
+      }
+      const otherFirebaseUid = uid1 === firebaseUid ? uid2 : uid1;
+      const otherUserId = firebaseToUserId.get(otherFirebaseUid);
+
+      if (otherUserId != null) {
         const otherSockets = connectedUsers.get(otherUserId);
         if (otherSockets) {
           for (const socketId of otherSockets) {
-            io.to(socketId).emit('messages-read', { conversationId, readBy: userId });
+            io.to(socketId).emit('messages-read', {
+              chatId,
+              lastMessageId,
+              readBy: userId,
+              timestamp: Date.now(),
+            });
           }
         }
       }
-    } catch (err: any) {
-      console.error('[Messaging] mark-read error:', err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `mark-read error: ${msg}`);
+    }
+  });
+
+  // ─── Message Delivered (Relay delivery receipt to sender) ──────────────
+  socket.on('message-delivered', async (data: ReceiptData) => {
+    try {
+      if (!data.recipientId) {
+        logger.warn('[Messaging]', 'message-delivered missing recipientId — dropped');
+        return;
+      }
+      const resolvedRecipientId = resolveRecipientId(data.recipientId);
+      if (resolvedRecipientId != null) {
+        const recipientSockets = connectedUsers.get(resolvedRecipientId);
+        if (recipientSockets) {
+          for (const socketId of recipientSockets) {
+            io.to(socketId).emit('message-delivered', {
+              messageId: data.messageId,
+              conversationId: data.conversationId,
+              deliveredAt: data.deliveredAt || Date.now(),
+              readBy: userId,
+            });
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `message-delivered error: ${msg}`);
+    }
+  });
+
+  // ─── Chat Opened (Relay read status to other party) ───────────────────
+  socket.on('chat-opened', async (data: { conversationId: string; readerUid: string; messageId?: string; readAt?: number }) => {
+    try {
+      const { conversationId, messageId, readAt } = data;
+      if (!conversationId) return;
+
+      // conversationId format: "firebaseUid1_firebaseUid2" (sorted)
+      const parts = conversationId.split('_');
+      if (parts.length !== 2) return;
+
+      const [uid1, uid2] = parts;
+      // Validate sender is a participant in this conversation
+      if (uid1 !== firebaseUid && uid2 !== firebaseUid) {
+        logger.warn('[Messaging]', `chat-opened: sender ${firebaseUid} not in conversationId ${conversationId} — rejected`);
+        return;
+      }
+      const otherFirebaseUid = uid1 === firebaseUid ? uid2 : uid1;
+      const otherUserId = firebaseToUserId.get(otherFirebaseUid);
+
+      if (otherUserId != null) {
+        const otherSockets = connectedUsers.get(otherUserId);
+        if (otherSockets) {
+          for (const socketId of otherSockets) {
+            io.to(socketId).emit('messages-read', {
+              chatId: conversationId,
+              lastMessageId: messageId || '',
+              readBy: userId,
+              timestamp: readAt || Date.now(),
+            });
+          }
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('[Messaging]', `chat-opened error: ${msg}`);
     }
   });
 }

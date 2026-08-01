@@ -1,13 +1,27 @@
 import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * FCM push notification service.
- * Sends push notifications to offline users via Firebase Cloud Messaging.
- * Uses Firebase Admin SDK with service account credentials.
+ *
+ * CRITICAL SECURITY: This service sends SILENT push notifications only.
+ * No plaintext message content is ever included in push notifications.
+ * The client decrypts locally and shows its own local notification.
+ *
+ * Flow:
+ *   1. Server sends silent push (data-only, no notification payload)
+ *   2. Client receives background data message
+ *   3. Client decrypts payload locally with ECDH key
+ *   4. Client shows local notification with decrypted content
+ *
+ * This means anyone looking at FCM traffic sees only opaque data fields —
+ * never message content, sender names, or any PII beyond routing IDs.
  */
 
-let firebaseApp: any = null;
-let messaging: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let firebaseApp: { messaging: () => any } | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let messaging: { send: (msg: Record<string, unknown>) => Promise<unknown> } | null = null;
 
 async function getMessaging() {
   if (messaging) return messaging;
@@ -23,23 +37,21 @@ async function getMessaging() {
       const serviceAccount = JSON.parse(config.firebaseServiceAccount);
       firebaseApp = admin.default.initializeApp({
         credential: admin.default.credential.cert(serviceAccount),
-      });
+      }) as unknown as { messaging: () => typeof messaging };
     }
 
     messaging = firebaseApp.messaging();
-    console.log('[FCM] Firebase Admin initialized');
     return messaging;
-  } catch (err: any) {
-    console.warn('[FCM] Not available:', err.message);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn('[FCM]', `Not available: ${msg}`);
     return null;
   }
 }
 
-export interface PushPayload {
-  fcmToken: string;
-  title: string;
-  body: string;
-  data?: Record<string, string>;
+export interface SilentPushData {
+  type: string;          // 'new-message' | 'call' | 'receipt' | 'key-rotate'
+  [key: string]: string; // Additional opaque data fields
 }
 
 export interface SendPushResult {
@@ -48,9 +60,21 @@ export interface SendPushResult {
 }
 
 /**
- * Send an FCM push notification to a single device.
+ * Send a SILENT push notification (data-only, no plaintext).
+ *
+ * The payload contains only opaque routing data:
+ *   - type: what kind of event (new-message, call, receipt)
+ *   - messageId: server-assigned ID (not content)
+ *   - senderId: numeric ID (not name)
+ *   - payloadHash: SHA-256 for integrity
+ *
+ * The client receives this in background, decrypts the actual message
+ * from the server, and shows its own local notification.
  */
-export async function sendPush(payload: PushPayload): Promise<SendPushResult> {
+export async function sendSilentPush(
+  fcmToken: string,
+  data: SilentPushData
+): Promise<SendPushResult> {
   const msg = await getMessaging();
 
   if (!msg) {
@@ -58,84 +82,87 @@ export async function sendPush(payload: PushPayload): Promise<SendPushResult> {
   }
 
   try {
+    // Silent push: data-only, NO notification payload
+    // iOS: triggers background fetch via content-available
+    // Android: triggers onMessageReceived in background service
     await msg.send({
-      token: payload.fcmToken,
-      notification: {
-        title: payload.title,
-        body: payload.body,
-      },
-      data: payload.data || {},
+      token: fcmToken,
+      data,  // Only data fields — no notification.title/body
       android: {
         priority: 'high' as const,
-        notification: {
-          channelId: 'veill-messages',
-          priority: 'high' as const,
-        },
       },
       apns: {
         payload: {
           aps: {
-            'content-available': 1,
-            sound: 'default',
+            'content-available': 1,  // iOS background fetch trigger
+            // NO sound, NO alert — truly silent
           },
         },
       },
     });
 
     return { success: true };
-  } catch (err: any) {
-    console.error('[FCM] sendPush error:', err.message);
-    return { success: false, error: err.message };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('[FCM]', `sendSilentPush error: ${msg}`);
+    return { success: false, error: msg };
   }
 }
 
 /**
- * Send push notification for a new message.
+ * Send silent push for a new message.
+ * The client will decrypt the actual message content locally.
  */
 export async function sendMessagePush(
   fcmToken: string,
-  senderName: string,
+  senderId: string,
+  messageId: string,
+  payloadHash: string,
   contentType: string
 ): Promise<SendPushResult> {
-  const typeLabel = contentType === 'text' ? 'Message' :
-    contentType === 'image' ? '📷 Photo' :
-    contentType === 'video' ? '🎬 Video' :
-    contentType === 'audio' ? '🎤 Audio' : 'Message';
-
-  return sendPush({
-    fcmToken,
-    title: senderName,
-    body: `Sent a ${typeLabel.toLowerCase()}`,
-    data: {
-      type: 'message',
-      contentType,
-      senderName,
-    },
+  return sendSilentPush(fcmToken, {
+    type: 'new-message',
+    senderId,
+    messageId,
+    payloadHash,
+    contentType,
   });
 }
 
 /**
- * Send push notification for a call.
+ * Send silent push for an incoming call.
+ * The client will show the call UI locally.
  */
 export async function sendCallPush(
   fcmToken: string,
-  callerName: string,
-  callType: 'audio' | 'video'
+  callerId: string,
+  callType: 'voice' | 'video'
 ): Promise<SendPushResult> {
-  return sendPush({
-    fcmToken,
-    title: `${callerName} is calling`,
-    body: `Incoming ${callType} call`,
-    data: {
-      type: 'call',
-      callType,
-      callerName,
-    },
+  return sendSilentPush(fcmToken, {
+    type: 'call',
+    callerId,
+    callType,
+  });
+}
+
+/**
+ * Send silent push for a read/delivery receipt.
+ */
+export async function sendReceiptPush(
+  fcmToken: string,
+  messageId: string,
+  status: 'delivered' | 'read'
+): Promise<SendPushResult> {
+  return sendSilentPush(fcmToken, {
+    type: 'receipt',
+    messageId,
+    status,
   });
 }
 
 export const fcmService = {
-  sendPush,
+  sendSilentPush,
   sendMessagePush,
   sendCallPush,
+  sendReceiptPush,
 };

@@ -1,15 +1,30 @@
 import db from './pool.js';
+import fs from 'fs';
+import path from 'path';
+import { logger } from '../utils/logger.js';
 
 /**
- * Database schema — 6 tables for the Veill server (SQLite).
+ * Database schema — 7 tables for the Veill server (SQLite).
  *
- * 1. users           — Firebase UID ↔ server identity
- * 2. conversations   — 1:1 chat rooms (canonical ordering: user1 < user2)
- * 3. messages        — individual messages with delivery/read status
- * 4. friend_requests — pending friend requests
- * 5. friendships     — bidirectional friend links
- * 6. media_chunks    — temporary chunk storage metadata for relay
+ * 1. users             — Firebase UID ↔ server identity
+ * 2. conversations     — 1:1 chat rooms (canonical ordering: user1 < user2)
+ * 3. messages          — DEPRECATED: kept for backward compat, no new writes
+ * 4. friend_requests   — pending friend requests
+ * 5. friendships       — bidirectional friend links
+ * 6. media_files       — .veill file metadata (encrypted blobs stored on disk)
+ * 7. pending_payloads  — encrypted payloads for offline delivery (relay-only)
+ *
+ * SECURITY MODEL: The server NEVER sees plaintext message content.
+ * All message content is encrypted client-side via ECDH + AES-256-GCM.
+ * The server only relays opaque encrypted blobs between clients.
+ * pending_payloads stores encrypted blobs until the recipient comes online.
  */
+
+// Ensure media directory exists
+const mediaDir = path.join(process.cwd(), 'media');
+if (!fs.existsSync(mediaDir)) {
+  fs.mkdirSync(mediaDir, { recursive: true });
+}
 
 const MIGRATION_SQL = `
   CREATE TABLE IF NOT EXISTS users (
@@ -70,25 +85,42 @@ const MIGRATION_SQL = `
     UNIQUE (user1_id, user2_id)
   );
 
-  CREATE TABLE IF NOT EXISTS media_chunks (
+  CREATE TABLE IF NOT EXISTS media_files (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    chunk_id        TEXT NOT NULL,
-    message_id      TEXT NOT NULL,
-    sender_uid      TEXT NOT NULL,
-    recipient_uid   TEXT NOT NULL,
-    chunk_index     INTEGER NOT NULL,
-    total_chunks    INTEGER NOT NULL,
+    file_id         TEXT UNIQUE NOT NULL,
+    sender_uid      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_uid   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     mime_type       TEXT NOT NULL DEFAULT 'application/octet-stream',
     file_name       TEXT DEFAULT '',
     file_size       INTEGER DEFAULT 0,
-    storage_path    TEXT DEFAULT '',
+    disk_path       TEXT NOT NULL,
     is_transient    INTEGER DEFAULT 1,
     created_at      TEXT DEFAULT (datetime('now')),
     expires_at      TEXT DEFAULT (datetime('now', '+24 hours'))
   );
 
-  CREATE INDEX IF NOT EXISTS idx_media_chunks_message ON media_chunks(message_id);
-  CREATE INDEX IF NOT EXISTS idx_media_chunks_recipient ON media_chunks(recipient_uid);
+  CREATE INDEX IF NOT EXISTS idx_media_files_recipient ON media_files(recipient_uid);
+  CREATE INDEX IF NOT EXISTS idx_media_files_sender ON media_files(sender_uid);
+
+  -- Pending payloads: encrypted blobs waiting for offline recipients
+  -- These are deleted once the recipient fetches them via get-pending
+  -- No TTL expiry — they stay until delivered (WhatsApp-like behavior)
+  CREATE TABLE IF NOT EXISTS pending_payloads (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id        TEXT NOT NULL,
+    sender_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    encrypted_payload TEXT NOT NULL,       -- Opaque encrypted blob (server cannot decrypt)
+    payload_hash      TEXT NOT NULL,       -- SHA-256 of encrypted payload for integrity
+    content_type      TEXT NOT NULL DEFAULT 'text',
+    temp_id           TEXT DEFAULT '',
+    chunk_count       INTEGER DEFAULT 1,
+    total_size        INTEGER DEFAULT 0,
+    created_at        TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pending_payloads_recipient ON pending_payloads(recipient_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_pending_payloads_message ON pending_payloads(message_id);
 `;
 
 export async function migrate(): Promise<void> {
@@ -96,12 +128,12 @@ export async function migrate(): Promise<void> {
     const statements = MIGRATION_SQL.split(';').filter(s => s.trim());
     for (const stmt of statements) {
       if (stmt.trim()) {
-        db.query(stmt.trim());
+        await db.query(stmt.trim());
       }
     }
-    console.log('[DB] Migration complete — all tables ready (SQLite)');
+    logger.info('[DB]', 'Migration complete — all tables ready (SQLite)');
   } catch (err) {
-    console.error('[DB] Migration failed:', err);
+    logger.error('[DB]', 'Migration failed:', err);
     throw err;
   }
 }

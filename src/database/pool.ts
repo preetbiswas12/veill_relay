@@ -48,15 +48,19 @@ function translateSql(sql: string): string {
   return s;
 }
 
+type SqlValue = string | number | boolean | null;
+
 interface QueryResult {
-  rows: any[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rows: Record<string, any>[];
   rowCount: number;
 }
 
 /**
  * Execute a query and return results in pg-compatible format.
  */
-function query(sql: string, params?: any[]): QueryResult {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function query(sql: string, params?: SqlValue[] | any[]): QueryResult {
   const translated = translateSql(sql);
   const trimmed = translated.trim().toUpperCase();
 
@@ -74,7 +78,10 @@ function query(sql: string, params?: any[]): QueryResult {
     const tableMatch = translated.match(/INSERT\s+INTO\s+(\w+)/i);
     const tableName = tableMatch ? tableMatch[1] : '';
 
-    if (tableName) {
+    // Only allow known table names to prevent SQL injection via table name interpolation
+    const ALLOWED_TABLES = new Set(['users', 'conversations', 'messages', 'friend_requests', 'friendships', 'media_files', 'pending_payloads', 'groups']);
+
+    if (tableName && ALLOWED_TABLES.has(tableName)) {
       try {
         const fetchStmt = db.prepare(`SELECT * FROM "${tableName}" WHERE rowid = ?`);
         const row = fetchStmt.get(rowId);
@@ -90,7 +97,7 @@ function query(sql: string, params?: any[]): QueryResult {
 
   if (trimmed.startsWith('SELECT')) {
     const stmt = db.prepare(translated);
-    const rows = params ? stmt.all(...params) : stmt.all();
+    const rows = (params ? stmt.all(...params) : stmt.all()) as Record<string, unknown>[];
     return { rows, rowCount: rows.length };
   }
 
@@ -103,13 +110,14 @@ function query(sql: string, params?: any[]): QueryResult {
 /**
  * Wrap for async usage — all handlers use await pool.query(...)
  */
-async function asyncQuery(sql: string, params?: any[]): Promise<QueryResult> {
+async function asyncQuery(sql: string, params?: SqlValue[]): Promise<QueryResult> {
   return query(sql, params);
 }
 
 // Export in pg.Pool-compatible format
-export default {
+const pool = {
   query: asyncQuery,
   end: () => db.close(),
-  _raw: db,
+  _raw: db as unknown as Record<string, unknown>,
 };
+export default pool;
