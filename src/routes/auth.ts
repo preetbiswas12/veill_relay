@@ -43,7 +43,7 @@ async function verifyFirebaseIdToken(idToken: string): Promise<{ uid: string; em
 // Simple in-memory rate limiter (per-IP)
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_WINDOW = 60_000; // 1 minute
-const RATE_LIMIT_MAX_AUTH = 10; // max requests per window for auth endpoints
+const RATE_LIMIT_MAX_AUTH = 20; // max requests per window for auth endpoints (login+register flow needs 2)
 const RATE_LIMIT_MAX_SEARCH = 20; // max requests per window for search
 
 function rateLimit(ip: string, max = RATE_LIMIT_MAX_AUTH): boolean {
